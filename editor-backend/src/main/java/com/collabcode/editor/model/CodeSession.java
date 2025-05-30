@@ -6,19 +6,12 @@ import lombok.NoArgsConstructor;
 
 import java.util.List;
 
-@AllArgsConstructor
-@NoArgsConstructor
 @Data
-public class CodeExecutionRequest {
+@NoArgsConstructor
+@AllArgsConstructor
+public class CodeSession {
+    private String sessionId;
     private String language;
     private String entrypoint;
     private List<CodeFile> files;
-
-    @AllArgsConstructor
-    @NoArgsConstructor
-    @Data
-    public static class CodeFile{
-        private String filename;
-        private String content;
-    }
 }
