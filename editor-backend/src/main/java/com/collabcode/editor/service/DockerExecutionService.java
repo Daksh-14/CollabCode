@@ -1,6 +1,7 @@
 package com.collabcode.editor.service;
 
-import com.collabcode.editor.model.CodeExecutionRequest;
+import com.collabcode.editor.model.CodeSession;
+import com.collabcode.editor.model.CodeFile;
 import com.collabcode.editor.util.FileUtils;
 import org.springframework.stereotype.Service;
 
@@ -11,18 +12,16 @@ import java.util.UUID;
 @Service
 public class DockerExecutionService {
 
-    public String executeCode(CodeExecutionRequest request) throws IOException, InterruptedException {
+    public String executeCode(CodeSession request) throws IOException, InterruptedException {
         String folderId = UUID.randomUUID().toString();
         Path tempDir = Files.createTempDirectory("code-" + UUID.randomUUID().toString().replace("-", ""));
-        System.out.println("Temp directory: " + tempDir.toAbsolutePath());
         StringBuilder output = new StringBuilder();
 
         try {
-            for (CodeExecutionRequest.CodeFile file : request.getFiles()) {
-                Path filePath = tempDir.resolve(file.getFilename());
+            for (CodeFile file : request.getFiles()) {
+                Path filePath = tempDir.resolve(file.getPath());
                 Files.createDirectories(filePath.getParent());
                 Files.writeString(filePath, file.getContent());
-                System.out.println("Written: " + filePath + " → Exists? " + Files.exists(filePath));
             }
 
 
@@ -42,8 +41,6 @@ public class DockerExecutionService {
                     volumePath, image, getRunCommand(request.getLanguage(), request.getEntrypoint())
             );
 
-            System.out.println("Running Docker Command: " + dockerCmd);
-
             ProcessBuilder pb = isWindows
                     ? new ProcessBuilder("cmd.exe", "/c", dockerCmd)
                     : new ProcessBuilder("bash", "-c", dockerCmd);
@@ -58,7 +55,6 @@ public class DockerExecutionService {
             }
 
             int exitCode = process.waitFor();
-            System.out.println("Docker exited with code: " + exitCode);
 
         } finally {
             FileUtils.deleteDirectory(tempDir);
@@ -70,7 +66,7 @@ public class DockerExecutionService {
     private String getDockerImage(String language) {
         return switch (language.toLowerCase()) {
             case "java" -> "java-runner";
-            case "python" -> "python-runner";
+            case "py" -> "python-runner";
             case "cpp" -> "cpp-runner";
             default -> null;
         };
@@ -79,7 +75,7 @@ public class DockerExecutionService {
     private String getRunCommand(String language, String entrypoint) {
         return switch (language.toLowerCase()) {
             case "java" -> "find . -name \"*.java\" | xargs javac && java " + entrypoint.replace(".java", "");
-            case "python" -> String.format("python %s", entrypoint);
+            case "py" -> String.format("python %s", entrypoint);
             case "cpp" -> "g++ -std=c++17 -o main $(find . -name \"*.cpp\") && ./main";
             default -> "";
         };
