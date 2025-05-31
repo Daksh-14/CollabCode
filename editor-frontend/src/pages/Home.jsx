@@ -12,6 +12,7 @@ const HomePage = () => {
   const [sessionName, setSessionName] = useState('');
   const navigate = useNavigate();
   const [folderFiles, setFolderFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
 
   const handleFolderSelect = (e) => {
     setFolderFiles(Array.from(e.target.files));
@@ -19,7 +20,9 @@ const HomePage = () => {
 
   const handleJoinSession = async () => {
     try {
+      setLoading(true);
       const res = await axios.get(`https://collabcode-backend-z04k.onrender.com/api/sessions/${sessionId}`);
+      setLoading(false);
       if (res.status === 200) {
         navigate(`/editor/${sessionId}`);
       }
@@ -31,6 +34,7 @@ const HomePage = () => {
   const handleCreateSession = async () => {
     try {
       console.log("Creating session with name:", sessionName);
+      setLoading(true);
       const sessionRes = await axios.post('https://collabcode-backend-z04k.onrender.com/api/sessions', {
         name: sessionName,
       });
@@ -79,18 +83,27 @@ const HomePage = () => {
         });
       }
       await axios.post(`https://collabcode-backend-z04k.onrender.com/api/sessions/bulk`, filesPayload);
+      setLoading(false);
       navigate(`/editor/${newSessionId}`);
     } catch (err) {
       alert("Failed to create session.");
     }
   };
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-slate-700">
+        <div className="text-slate-100 text-2xl">Joining the session...</div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-8 min-h-screen bg-slate-700 px-4 py-6 sm:px-8">
       <div className="text-center text-4xl font-extrabold text-slate-100">
         CodeCollab
       </div>
-      <HeroSection handleClick={()=>setShowModal(1)}/>
+      <HeroSection handleClick={() => setShowModal(1)} />
       {showModal > 0 && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-slate-800 w-[90%] max-w-md p-6 rounded-lg shadow-2xl">
@@ -163,7 +176,7 @@ const HomePage = () => {
           </div>
         </div>
       )}
-      <Features/>
+      <Features />
       <FAQ />
       <Footer />
     </div>

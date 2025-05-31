@@ -4,8 +4,8 @@ import { FiPlus, FiMinus } from 'react-icons/fi';
 const faqs = [
   { question: 'What is CollabCode?',      answer: 'A real‑time collaborative code editor that lets multiple users write, edit, and run code together instantly.' },
   { question: 'Do I need to sign up?',     answer: 'No signup needed — just create or join a session to start coding with others.' },
-  { question: 'What languages are supported?', answer: 'Currently supports Java, Python, and C++. More coming soon!' },
-  { question: 'Is it safe to run code here?',  answer: 'Yes. Your code runs inside a secure, isolated Docker container to ensure safety and stability.' },
+  { question: 'What languages are supported?', answer: 'Currently supports Python and C++. More coming soon!' },
+  { question: 'Is it safe to run code here?',  answer: 'Yes. Your code runs inside a secure and sandboxed environment to ensure safety and stability.' },
   { question: 'Can I invite others to my session?', answer: 'Absolutely! Just share your session link and collaborate in real time.' },
 ];
 
