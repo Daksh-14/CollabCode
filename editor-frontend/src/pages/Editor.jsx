@@ -189,7 +189,11 @@ const Editor = () => {
     }
   };
 
-  if (!currentFile) return <div>Loading…</div>;
+  if (!currentFile) return (
+    <div className="flex items-center justify-center min-h-screen bg-slate-700">
+        <div className="text-slate-100 text-2xl">Joining the session...</div>
+      </div>
+  );
   return (
     <div className="flex flex-col h-screen bg-[#1e1e1e] text-white">
       <div className="text-lg font-semibold text-white px-4 py-2 bg-[#2d2d2d] border-b border-gray-600 flex justify-between items-center">
