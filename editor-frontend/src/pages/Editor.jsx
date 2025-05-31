@@ -28,7 +28,7 @@ const Editor = () => {
   };
 
   useEffect(() => {
-    axios.get(`http://localhost:8080/api/sessions/${sessionId}`)
+    axios.get(`https://collabcode-backend-z04k.onrender.com/api/sessions/${sessionId}`)
       .then(res => setSessionName(res.data.sessionName))
       .catch();
   }, [sessionId]);
@@ -41,7 +41,7 @@ const Editor = () => {
   };
 
   useEffect(() => {
-    const ws = new WebSocket(`ws://localhost:8080/ws/code?sessionId=${sessionId}`);
+    const ws = new WebSocket(`wss://collabcode-backend-z04k.onrender.com/ws/code?sessionId=${sessionId}`);
     socketRef.current = ws;
     ws.onmessage = ({ data }) => {
       const msg = JSON.parse(data);
@@ -118,7 +118,7 @@ const Editor = () => {
         return { path, content };
       });
 
-      const response = await axios.post("http://localhost:8080/api/sessions/execute", {
+      const response = await axios.post("https://collabcode-backend-z04k.onrender.com/api/sessions/execute", {
         sessionId,
         language: mainFile.split('.').pop(),
         entrypoint: mainFile,

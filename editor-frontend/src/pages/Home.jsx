@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import FAQ from '../components/FAQ';
-import Hero from '../assets/trytry.png';
 import Footer from '../components/Footer';
 import { useNavigate } from 'react-router-dom';
 import Features from '../components/Features';
@@ -20,7 +19,7 @@ const HomePage = () => {
 
   const handleJoinSession = async () => {
     try {
-      const res = await axios.get(`http://localhost:8080/api/sessions/${sessionId}`);
+      const res = await axios.get(`https://collabcode-backend-z04k.onrender.com/api/sessions/${sessionId}`);
       if (res.status === 200) {
         navigate(`/editor/${sessionId}`);
       }
@@ -31,9 +30,11 @@ const HomePage = () => {
 
   const handleCreateSession = async () => {
     try {
-      const sessionRes = await axios.post('http://localhost:8080/api/sessions', {
+      console.log("Creating session with name:", sessionName);
+      const sessionRes = await axios.post('https://collabcode-backend-z04k.onrender.com/api/sessions', {
         name: sessionName,
       });
+      console.log("Session created with ID:", sessionRes.data.id);
       const newSessionId = sessionRes.data.id;
       const filesPayload = [];
       if (folderFiles.length > 0) {
@@ -77,7 +78,7 @@ const HomePage = () => {
           content: "keep",
         });
       }
-      await axios.post(`http://localhost:8080/api/sessions/bulk`, filesPayload);
+      await axios.post(`https://collabcode-backend-z04k.onrender.com/api/sessions/bulk`, filesPayload);
       navigate(`/editor/${newSessionId}`);
     } catch (err) {
       alert("Failed to create session.");
