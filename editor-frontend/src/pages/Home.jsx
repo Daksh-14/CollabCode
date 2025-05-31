@@ -92,8 +92,11 @@ const HomePage = () => {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-700">
-        <div className="text-slate-100 text-2xl">Joining the session...</div>
+      <div className="absolute inset-0 bg-black bg-opacity-40 z-10 flex items-center justify-center">
+        <div className='flex flex-col gap-4 justify-center items-center'>
+          <div className="text-slate-100 text-2xl">Joining the session...</div>
+          <div className="animate-spin rounded-full h-10 w-10 border-t-4 border-blue-500"></div>
+        </div>
       </div>
     );
   }
