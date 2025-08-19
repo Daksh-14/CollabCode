@@ -4,7 +4,7 @@ import Editor from './pages/Editor'
 
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/">
       <Routes>
         <Route path="/" element={<Home/>} />
         <Route path="/editor/:sessionId" element={<Editor/>} />
