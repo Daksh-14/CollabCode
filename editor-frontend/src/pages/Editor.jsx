@@ -124,7 +124,7 @@ const Editor = () => {
         entrypoint: mainFile,
         files: codeFiles,
       });
-      const result = response.data;
+      const result = String(response.data);
       setFiles(prev => ({
         ...prev,
         "output.txt": result,
