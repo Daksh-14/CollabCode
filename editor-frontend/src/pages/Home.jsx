@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import Features from '../components/Features';
 import HeroSection from '../components/HeroSection';
 import axios from 'axios';
+import { apiUrl } from '../config';
 
 const HomePage = () => {
   const [showModal, setShowModal] = useState(0);
@@ -21,24 +22,22 @@ const HomePage = () => {
   const handleJoinSession = async () => {
     try {
       setLoading(true);
-      const res = await axios.get(`https://collabcode-backend-z04k.onrender.com/api/sessions/${sessionId}`);
+      const res = await axios.get(apiUrl(`/api/sessions/${sessionId}`));
       setLoading(false);
       if (res.status === 200) {
         navigate(`/editor/${sessionId}`);
       }
-    } catch (err) {
+    } catch {
       alert('Failed to join session. Make sure the Session ID is correct.');
     }
   }
 
   const handleCreateSession = async () => {
     try {
-      console.log("Creating session with name:", sessionName);
       setLoading(true);
-      const sessionRes = await axios.post('https://collabcode-backend-z04k.onrender.com/api/sessions', {
+      const sessionRes = await axios.post(apiUrl('/api/sessions'), {
         name: sessionName,
       });
-      console.log("Session created with ID:", sessionRes.data.id);
       const newSessionId = sessionRes.data.id;
       const filesPayload = [];
       if (folderFiles.length > 0) {
@@ -82,10 +81,10 @@ const HomePage = () => {
           content: "keep",
         });
       }
-      await axios.post(`https://collabcode-backend-z04k.onrender.com/api/sessions/bulk`, filesPayload);
+      await axios.post(apiUrl('/api/sessions/bulk'), filesPayload);
       setLoading(false);
       navigate(`/editor/${newSessionId}`);
-    } catch (err) {
+    } catch {
       alert("Failed to create session.");
     }
   };

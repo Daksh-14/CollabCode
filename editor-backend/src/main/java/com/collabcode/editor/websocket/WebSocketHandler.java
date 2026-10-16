@@ -18,26 +18,30 @@ import redis.clients.jedis.JedisPubSub;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
+import java.net.URI;
 import java.util.*;
 import java.util.concurrent.*;
 
 @Component
 public class WebSocketHandler extends TextWebSocketHandler {
 
-    @Value("${upstash.data.redis.url}")
+    @Value("${spring.data.redis.url}")
     private String redisUrl;
 
-    @Value("${upstash.data.redis.password}")
+    @Value("${spring.data.redis.password:}")
     private String redisPassword;
+
     private static final Logger log = LoggerFactory.getLogger(WebSocketHandler.class);
     private static final String CHANNEL = "collabcode-updates";
 
     private final FileService fileService;
     private final HashOperations<String, String, String> hashOps;
-    private final Jedis subscriberClient;
     private final JedisPubSub pubsub;
     private final ScheduledExecutorService saver = Executors.newSingleThreadScheduledExecutor();
     private final ExecutorService subscriberExecutor = Executors.newSingleThreadExecutor();
+
+    /** Created in {@link #initSubscriber()}; @Value fields are not populated until after construction. */
+    private volatile Jedis subscriberClient;
 
     private final Map<String, Set<WebSocketSession>> roomClients = new ConcurrentHashMap<>();
     private final Map<WebSocketSession, String> sessionIds = new ConcurrentHashMap<>();
@@ -74,26 +78,24 @@ public class WebSocketHandler extends TextWebSocketHandler {
                 }
             }
         };
-
-        this.subscriberClient = new Jedis(redisUrl);
-        this.subscriberClient.auth(redisPassword);
-
-        saver.scheduleAtFixedRate(this::flushModifiedFiles, 10, 10, TimeUnit.SECONDS);
-
-        subscriberExecutor.submit(this::runSubscriberLoop);
     }
 
     private void runSubscriberLoop() {
         int attempts = 0;
         while (!Thread.currentThread().isInterrupted()) {
             try {
-                subscriberClient.subscribe(pubsub, CHANNEL);
+                Jedis client = subscriberClient;
+                if (client == null) {
+                    throw new IllegalStateException("Redis subscriber client is not initialised");
+                }
+                client.subscribe(pubsub, CHANNEL);
             } catch (Exception e) {
                 attempts++;
                 long backoff = Math.min(30, attempts * 5);
                 log.warn("Redis subscribe failed (attempt {}), retrying in {}s", attempts, backoff, e);
                 try { TimeUnit.SECONDS.sleep(backoff); } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
+                    return;
                 }
             }
         }
@@ -101,7 +103,21 @@ public class WebSocketHandler extends TextWebSocketHandler {
 
     @PostConstruct
     public void initSubscriber() {
-        log.info("WebSocketHandler initialized, starting Redis subscriber thread");
+        log.info("WebSocketHandler initialised, connecting Redis subscriber to {}", redisUrl);
+        this.subscriberClient = buildSubscriberClient();
+        saver.scheduleAtFixedRate(this::flushModifiedFiles, 10, 10, TimeUnit.SECONDS);
+        subscriberExecutor.submit(this::runSubscriberLoop);
+    }
+
+    private Jedis buildSubscriberClient() {
+        Jedis client = new Jedis(URI.create(redisUrl));
+        // Credentials may already be embedded in the URI (Upstash rediss:// style);
+        // only issue an explicit AUTH when they are not.
+        boolean credentialsInUri = URI.create(redisUrl).getUserInfo() != null;
+        if (!credentialsInUri && redisPassword != null && !redisPassword.isBlank()) {
+            client.auth(redisPassword);
+        }
+        return client;
     }
 
     @PreDestroy
@@ -110,10 +126,12 @@ public class WebSocketHandler extends TextWebSocketHandler {
 
         pubsub.unsubscribe();
         subscriberExecutor.shutdownNow();
-
         saver.shutdownNow();
 
-        subscriberClient.close();
+        Jedis client = subscriberClient;
+        if (client != null) {
+            client.close();
+        }
     }
 
     @Override
@@ -218,9 +236,21 @@ public class WebSocketHandler extends TextWebSocketHandler {
     }
 
     private void publishRaw(Map<String,Object> msg) {
-        try (Jedis p = new Jedis(redisUrl)) {
-            p.auth(redisPassword);
-            p.publish(CHANNEL, new ObjectMapper().writeValueAsString(msg));
+        String payload;
+        try {
+            payload = new ObjectMapper().writeValueAsString(msg);
+        } catch (Exception ex) {
+            log.error("Failed to serialise WS message", ex);
+            return;
+        }
+
+        try (Jedis p = new Jedis(URI.create(redisUrl))) {
+            URI uri = URI.create(redisUrl);
+            boolean credentialsInUri = uri.getUserInfo() != null;
+            if (!credentialsInUri && redisPassword != null && !redisPassword.isBlank()) {
+                p.auth(redisPassword);
+            }
+            p.publish(CHANNEL, payload);
         } catch (Exception ex) {
             log.error("Failed to publish WS message", ex);
         }

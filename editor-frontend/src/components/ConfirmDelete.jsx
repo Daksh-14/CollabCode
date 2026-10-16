@@ -1,9 +1,6 @@
-
-const ConfirmDelete = ({onCancel,onDelete,confirmDelete}) => {
-    console.log("ConfirmDelete component rendered");
-    console.log("ConfirmDelete props:", {onCancel, onDelete, confirmDelete});
+const ConfirmDelete = ({ onCancel, onDelete, confirmDelete }) => {
     return (
-        <div className="fixed inset-0  bg-opacity-50 flex items-center justify-center z-50" >
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-[#2d2d2d] text-white p-6 rounded-xl w-[300px] shadow-lg">
                 <h3 className="text-lg font-semibold mb-4">Delete Confirmation</h3>
                 <p className="mb-6">
@@ -24,7 +21,7 @@ const ConfirmDelete = ({onCancel,onDelete,confirmDelete}) => {
                     </button>
                 </div>
             </div>
-        </div >
+        </div>
     );
 }
 

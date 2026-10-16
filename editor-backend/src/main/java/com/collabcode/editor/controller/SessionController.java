@@ -1,10 +1,8 @@
 package com.collabcode.editor.controller;
 
-import com.collabcode.editor.model.CodeFile;
 import com.collabcode.editor.model.CodeSession;
 import com.collabcode.editor.model.FileEntity;
 import com.collabcode.editor.model.SessionEntity;
-import com.collabcode.editor.service.DockerExecutionService;
 import com.collabcode.editor.service.FileService;
 import com.collabcode.editor.service.SandboxExecutionService;
 import com.collabcode.editor.service.SessionService;
@@ -22,14 +20,12 @@ public class SessionController {
 
     private final SessionService sessionService;
     private final FileService fileService;
-    private final DockerExecutionService dockerExecutionService;
     private final SandboxExecutionService sandboxExecutionService;
 
-    public SessionController(SessionService sessionService, FileService fileService, DockerExecutionService dockerExecutionService,SandboxExecutionService sandboxExecutionService) {
+    public SessionController(SessionService sessionService, FileService fileService, SandboxExecutionService sandboxExecutionService) {
         this.sessionService = sessionService;
         this.fileService = fileService;
-        this.dockerExecutionService = dockerExecutionService;
-        this.sandboxExecutionService= sandboxExecutionService;
+        this.sandboxExecutionService = sandboxExecutionService;
     }
 
     @PostMapping

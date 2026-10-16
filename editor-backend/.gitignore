@@ -31,3 +31,11 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Local configuration and secrets ###
+src/main/resources/application-local.properties
+src/main/resources/application-local.yml
+*.pem
+!src/main/resources/ca.pem
+.env
+.env.*
