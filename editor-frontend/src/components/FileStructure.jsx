@@ -16,7 +16,7 @@ const useSize = (target) => {
   return size;
 };
 
-const FileStructure = ({ files, currentFile, mainFile, onFileSelect, onSetMainFile, onAdd, onDelete, setConfirmDelete  }) => {
+const FileStructure = ({ files, currentFile, mainFile, onFileSelect, onSetMainFile, onAdd, setConfirmDelete  }) => {
   const [fileStruct, setFileStruct] = useState([]);
   const containerRef = useRef(null);
   const size = useSize(containerRef);
@@ -103,7 +103,7 @@ const FileStructure = ({ files, currentFile, mainFile, onFileSelect, onSetMainFi
   }, []);
 
   return (
-    <div ref={containerRef} className="hehe h-full w-full m-2 ">
+    <div ref={containerRef} className="h-full w-full m-2 ">
       <AddFileFolderModal
         isOpen={modalOpen}
         isFolder={isFolder}

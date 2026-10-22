@@ -1,4 +1,4 @@
-import { useRef, useEffect, useMemo, useState } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import Editor from '@monaco-editor/react';
 
 const CodeEditor = ({ filename, content, onCodeChange, path, reff }) => {
@@ -6,7 +6,6 @@ const CodeEditor = ({ filename, content, onCodeChange, path, reff }) => {
   const filenameRef = useRef(filename);
   const lastTimeoutRef = useRef(null);
   const typed = useRef(false);
-  const [loading, setLoading] = useState(false);
   const [fileLoading, setFileLoading] = useState(false);
   const [language, setLanguage] = useState('plaintext');
 
@@ -72,9 +71,6 @@ const CodeEditor = ({ filename, content, onCodeChange, path, reff }) => {
     }, 3000);
     return () => clearInterval(interval);
   }, [onCodeChange]);
-  if (loading) {
-    return <div>Loading...</div>;
-  }
   return (
     <Editor
       key={path}

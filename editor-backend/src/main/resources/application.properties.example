@@ -1,0 +1,31 @@
+# CollabCode backend configuration reference.
+#
+# Copy to application-local.properties (git-ignored) for local overrides, or set the
+# variables below as real environment variables in your deployment platform.
+# application.properties itself contains no secrets and is safe to commit.
+
+# --- Required in deployment ---------------------------------------------------
+
+# JDBC URL. Use sslmode=require for managed providers (Aiven, RDS, ...).
+DB_URL=jdbc:postgresql://user:password@host:5432/dbname?sslmode=require
+
+DB_USER=username
+DB_PASS=password
+
+# Absolute or working-directory-relative path to the PEM CA bundle that signed the
+# database server certificate. Needed whenever sslmode=require is used against a
+# managed provider. Leave empty for local development.
+DB_SSL_CA=./ca.pem
+
+# Redis connection. Use the rediss:// scheme for TLS endpoints.
+# Upstash format: rediss://default:<token>@<endpoint>:6379
+REDIS_URL=rediss://default:token@endpoint.upstash.io:6379
+REDIS_PASSWORD=token
+
+# --- Optional -----------------------------------------------------------------
+
+PORT=8080
+
+# firejail     - hardened firejail sandbox (default; no Docker required)
+# containerized - isolated container per run (requires a Docker-capable host)
+EXECUTION_TYPE=firejail
