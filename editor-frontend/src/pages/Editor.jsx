@@ -8,7 +8,7 @@ import * as monaco from 'monaco-editor';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import ConfirmDelete from '../components/ConfirmDelete';
-import { apiUrl, wsUrl } from '../config';
+import { API_BASE, apiUrl, wsUrl } from '../config';
 
 const Editor = () => {
   const { sessionId } = useParams();
@@ -21,6 +21,7 @@ const Editor = () => {
   const [confirmDelete, setConfirmDelete] = useState({ visible: false, path: null });
   const [sessionName, setSessionName] = useState('');
   const [wsStatus, setWsStatus] = useState('connecting');
+  const [initialised, setInitialised] = useState(false);
   const [runStatus, setRunStatus] = useState('idle');
   const [output, setOutput] = useState(null);
 
@@ -76,12 +77,22 @@ const Editor = () => {
       if (msg.type === 'init') {
         const incoming = msg.files ?? {};
         setFiles(incoming);
-        // Object key order is not meaningful. Pick a real source file
-        // deterministically — picking key 0 could select `folder/.keep`, which
-        // then resolves to language "keep" and fails to execute.
-        const firstFile = Object.keys(incoming).sort().find(isRunnableFile);
-        setCurrentFile(firstFile ?? null);
-        setMainFile(firstFile ?? null);
+        setInitialised(true);
+
+        // Two DIFFERENT decisions, deliberately:
+        //   currentFile - whatever to display. Must always resolve to something,
+        //                 otherwise the editor never renders and the UI sits on
+        //                 "Joining the session..." forever.
+        //   mainFile    - whatever to execute. Must be a real source file, or
+        //                 `temp/.keep` would become language "keep" and fail.
+        // A folderless session contains ONLY `temp/.keep`, so the runnable
+        // filter legitimately matches nothing and we fall back for mainFile.
+        const paths = Object.keys(incoming).sort();
+        const firstFile = paths[0] ?? null;
+        const firstRunnable = paths.find(isRunnableFile) ?? null;
+
+        setCurrentFile(firstFile);
+        setMainFile(firstRunnable ?? firstFile);
       }
 
       if (msg.type === 'edit') {
@@ -129,7 +140,7 @@ const Editor = () => {
   };
 
   const handleRun = async () => {
-    if (!mainFile) return;
+    if (!mainFile || !isRunnableFile(mainFile)) return;
 
     // Read straight from the live Monaco model: `files` state can lag behind
     // the editor by up to the 150ms debounce window.
@@ -155,7 +166,10 @@ const Editor = () => {
       setOutput(response.data ?? '');
       setRunStatus('success');
     } catch (err) {
-      setOutput(`Execution failed: ${err.message}`);
+      // Axios' `err.message` is only "Request failed with status code 400".
+      // The backend returns a specific, actionable `error` field - use it, or
+      // the user has no idea what actually went wrong.
+      setOutput(describeExecutionError(err));
       setRunStatus('error');
     }
   };
@@ -200,14 +214,24 @@ const Editor = () => {
     }
   };
 
-  if (!currentFile) {
+  const isConnectionProblem = wsStatus === 'error' || wsStatus === 'disconnected';
+
+  if (!currentFile && (isConnectionProblem || !initialised)) {
+    // Only these two states are worth replacing the whole screen for. An empty
+    // session still renders the full shell, because the file tree is how you
+    // add the first file — early-returning here would be a dead end.
     return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-700">
+      <div className="flex flex-col items-center justify-center gap-3 min-h-screen bg-slate-700">
         <div className="text-slate-100 text-2xl">
-          {wsStatus === 'error' || wsStatus === 'disconnected'
+          {isConnectionProblem
             ? 'Connection lost. Reload to rejoin the session.'
             : 'Joining the session...'}
         </div>
+        {isConnectionProblem && (
+          <div className="text-sm text-slate-300">
+            There is no reconnect yet — reloading will rejoin the session.
+          </div>
+        )}
       </div>
     );
   }
@@ -270,9 +294,12 @@ const Editor = () => {
                 Set as Main
               </button>
               <button
-                className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-50"
+                className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600"
                 onClick={handleRun}
-                disabled={!mainFile || runStatus === 'running'}
+                // `temp/.keep` is a folder marker, not a source file. Allowing it
+                // as mainFile would run language "keep" and fail confusingly.
+                disabled={!mainFile || runStatus === 'running' || !isRunnableFile(mainFile)}
+                title={mainFile && !isRunnableFile(mainFile) ? `${mainFile} is not a runnable source file` : ''}
               >
                 {runStatus === 'running' ? 'Running…' : 'Run ▶'}
               </button>
@@ -280,13 +307,19 @@ const Editor = () => {
           </div>
 
           <div className="flex-1 min-h-0">
-            <CodeEditor
-              filename={currentFile}
-              content={files[currentFile] || ''}
-              onCodeChange={handleCodeChange}
-              path={currentFile}
-              reff={externalUpdateRef}
-            />
+            {currentFile ? (
+              <CodeEditor
+                filename={currentFile}
+                content={files[currentFile] || ''}
+                onCodeChange={handleCodeChange}
+                path={currentFile}
+                reff={externalUpdateRef}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+                No file selected. Add one from the file tree.
+              </div>
+            )}
           </div>
 
           <OutputPanel
@@ -312,8 +345,29 @@ const Editor = () => {
 
 /** Folder markers and output files are not valid entrypoints. */
 function isRunnableFile(path) {
+  if (!path) return false;
   if (path.endsWith('/.keep')) return false;
   return /\.(java|py|cpp|c|js|ts|txt)$/i.test(path);
+}
+
+/**
+ * Surfaces the backend's actual error rather than axios' generic
+ * "Request failed with status code 4xx", which tells the user nothing.
+ */
+function describeExecutionError(err) {
+  const data = err?.response?.data;
+  if (typeof data === 'string' && data.trim()) return `Execution failed:\n${data}`;
+  if (data && typeof data.error === 'string') {
+    const detail = typeof data.detail === 'string' ? `\n${data.detail}` : '';
+    return `Execution failed: ${data.error}${detail}`;
+  }
+  if (err?.code === 'ECONNABORTED' || /timeout/i.test(err?.message ?? '')) {
+    return 'Execution failed: the request timed out. The backend may be slow to respond.';
+  }
+  if (!err?.response) {
+    return `Execution failed: could not reach the backend at ${API_BASE || 'this origin'}.`;
+  }
+  return `Execution failed: ${err.message}`;
 }
 
 export default Editor;

@@ -1,0 +1,84 @@
+# Local development dependencies.
+#
+#   docker compose up -d                      -> Redis only (if you already run Postgres locally)
+#   docker compose --profile full up -d        -> Redis + Postgres
+#
+# Redis is in the default set because it is required by the backend and has no
+# native Windows build. Postgres is behind the "full" profile so it does not
+# fight with a Postgres you are already running on port 5432.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: collabcode-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
+
+  postgres:
+    profiles: ["full"]
+    image: postgres:16-alpine
+    container_name: collabcode-postgres
+    ports:
+      # Host 5433, not 5432. A native PostgreSQL already serves 5432 on this
+      # machine, and Docker Desktop/WSL2 does NOT always reject the overlapping
+      # publish - it can start and leave traffic to localhost:5432 ambiguous
+      # between the two. Using 5433 keeps routing unambiguous.
+      #   DB_URL=jdbc:postgresql://localhost:5433/CollabCode
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: CollabCode
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d CollabCode"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  # Optional: run the backend as a container too.
+  #   docker compose --profile backend up -d
+  #
+  # You do NOT need this for normal development - running the backend with
+  # `./mvnw spring-boot:run` gives you hot reload and readable stack traces.
+  # It is here for testing the container image and for deploying the full stack.
+  #
+  # The backend is NOT in the default profile on purpose: on `up -d` you want
+  # just the dependencies, and the app on your host with its debugger attached.
+  #
+  # Logs: docker logs -f collabcode-backend     (no log file - it writes to stdout)
+  backend:
+    profiles: ["backend"]
+    build:
+      context: ./editor-backend
+    image: editor-backend:local
+    container_name: collabcode-backend
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      # host.docker.internal reaches services on the Windows host. Inside a Linux
+      # network namespace, "localhost" means the container itself, not your machine.
+      DB_URL: "jdbc:postgresql://host.docker.internal:5432/CollabCode"
+      DB_USER: "postgres"
+      DB_PASS: "postgres"
+      # Service name, not localhost: on the compose network Redis is reachable
+      # by its service name.
+      REDIS_URL: "redis://redis:6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  postgres-data:

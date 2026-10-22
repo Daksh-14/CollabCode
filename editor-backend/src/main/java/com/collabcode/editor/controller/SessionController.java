@@ -1,11 +1,15 @@
 package com.collabcode.editor.controller;
 
+import com.collabcode.editor.execution.ExecutionResult;
+import com.collabcode.editor.execution.ExecutionService;
+import com.collabcode.editor.execution.ExecutionStrategy.ExecutionUnavailableException;
 import com.collabcode.editor.model.CodeSession;
 import com.collabcode.editor.model.FileEntity;
 import com.collabcode.editor.model.SessionEntity;
 import com.collabcode.editor.service.FileService;
-import com.collabcode.editor.service.SandboxExecutionService;
 import com.collabcode.editor.service.SessionService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -13,19 +17,30 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+/**
+ * Errors are logged here with their stack trace and returned to the client as
+ * JSON. Previously every endpoint caught Exception and returned
+ * `500 + e.getMessage()`, which discarded the stack trace and left nothing in
+ * the logs to diagnose from.
+ *
+ * The message is still surfaced so local development stays convenient, but it is
+ * logged rather than swallowed.
+ */
 @RestController
 @RequestMapping("/api/sessions")
 @CrossOrigin
 public class SessionController {
 
+    private static final Logger log = LoggerFactory.getLogger(SessionController.class);
+
     private final SessionService sessionService;
     private final FileService fileService;
-    private final SandboxExecutionService sandboxExecutionService;
+    private final ExecutionService executionService;
 
-    public SessionController(SessionService sessionService, FileService fileService, SandboxExecutionService sandboxExecutionService) {
+    public SessionController(SessionService sessionService, FileService fileService, ExecutionService executionService) {
         this.sessionService = sessionService;
         this.fileService = fileService;
-        this.sandboxExecutionService = sandboxExecutionService;
+        this.executionService = executionService;
     }
 
     @PostMapping
@@ -34,7 +49,8 @@ public class SessionController {
             SessionEntity session = sessionService.createSession(payload.get("name"));
             return ResponseEntity.ok(session);
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body("Failed to create session: " + e.getMessage());
+            log.error("Failed to create session", e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to create session", "detail", describe(e)));
         }
     }
 
@@ -45,7 +61,8 @@ public class SessionController {
             return session.map(ResponseEntity::ok)
                     .orElse(ResponseEntity.notFound().build());
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body("Failed to fetch session: " + e.getMessage());
+            log.error("Failed to fetch session {}", id, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to fetch session", "detail", describe(e)));
         }
     }
 
@@ -59,7 +76,8 @@ public class SessionController {
             session.setSessionName(newName);
             return ResponseEntity.ok(sessionService.saveSession(session));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body("Failed to rename session: " + e.getMessage());
+            log.error("Failed to rename session {}", id, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to rename session", "detail", describe(e)));
         }
     }
 
@@ -69,10 +87,10 @@ public class SessionController {
             List<FileEntity> savedFiles = fileService.saveFiles(files);
             return ResponseEntity.ok(savedFiles);
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body("Failed to save files: " + e.getMessage());
+            log.error("Failed to save {} files", files == null ? 0 : files.size(), e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to save files", "detail", describe(e)));
         }
     }
-
 
     @DeleteMapping("/{id}")
     public ResponseEntity<?> deleteSession(@PathVariable String id) {
@@ -80,17 +98,42 @@ public class SessionController {
             sessionService.deleteSession(id);
             return ResponseEntity.noContent().build();
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body("Failed to delete session: " + e.getMessage());
+            log.error("Failed to delete session {}", id, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", "Failed to delete session", "detail", describe(e)));
         }
     }
 
     @PostMapping("/execute")
     public ResponseEntity<?> executeSession(@RequestBody CodeSession request) {
         try {
-            String result = sandboxExecutionService.executeCode(request);
-            return ResponseEntity.ok(result);
+            ExecutionResult result = executionService.execute(request);
+            return ResponseEntity.ok(result.output());
+        } catch (IllegalArgumentException e) {
+            // Malformed request - the client's fault, and the message is actionable.
+            log.warn("Rejected execution request: {}", e.getMessage());
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (ExecutionUnavailableException e) {
+            // Environment cannot run code at all - a configuration problem.
+            log.warn("Execution unavailable: {}", e.getMessage());
+            return ResponseEntity.status(503).body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body("Execution failed: " + e.getMessage());
+            log.error("Code execution failed (language={}, entrypoint={})",
+                    request == null ? null : request.getLanguage(),
+                    request == null ? null : request.getEntrypoint(), e);
+            return ResponseEntity.internalServerError()
+                    .body(Map.of("error", "Execution failed", "detail", describe(e)));
         }
+    }
+
+    /** Which execution strategy is active, and whether the host can actually run code. */
+    @GetMapping("/execute/health")
+    public ResponseEntity<?> executionHealth() {
+        return ResponseEntity.ok(Map.of(
+                "strategy", executionService.strategyName(),
+                "supportedLanguages", List.of("java", "py", "cpp")));
+    }
+
+    private static String describe(Throwable e) {
+        return e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
     }
 }

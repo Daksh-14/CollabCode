@@ -86,12 +86,22 @@ public class WebSocketHandler extends TextWebSocketHandler {
             try {
                 Jedis client = subscriberClient;
                 if (client == null) {
-                    throw new IllegalStateException("Redis subscriber client is not initialised");
+                    // Startup could not reach Redis (degraded boot). Try again here
+                    // so the app recovers on its own once Redis comes back.
+                    client = buildSubscriberClient();
+                    subscriberClient = client;
+                    log.info("Redis subscriber client (re)established");
                 }
                 client.subscribe(pubsub, CHANNEL);
             } catch (Exception e) {
                 attempts++;
                 long backoff = Math.min(30, attempts * 5);
+                // The client is likely in an unknown state after a failure.
+                Jedis stale = subscriberClient;
+                subscriberClient = null;
+                if (stale != null) {
+                    try { stale.close(); } catch (Exception ignored) { }
+                }
                 log.warn("Redis subscribe failed (attempt {}), retrying in {}s", attempts, backoff, e);
                 try { TimeUnit.SECONDS.sleep(backoff); } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
@@ -104,17 +114,34 @@ public class WebSocketHandler extends TextWebSocketHandler {
     @PostConstruct
     public void initSubscriber() {
         log.info("WebSocketHandler initialised, connecting Redis subscriber to {}", redisUrl);
-        this.subscriberClient = buildSubscriberClient();
+
+        // Never let a Redis outage kill the application context. The subscriber
+        // loop already retries with backoff, so the correct behaviour is to start
+        // degraded and recover, not to refuse to boot. (Throwing here also meant
+        // the retry loop never got to run - the very code that would have fixed
+        // the outage was skipped by the failure.)
+        this.subscriberClient = buildSubscriberClientQuietly();
+
         saver.scheduleAtFixedRate(this::flushModifiedFiles, 10, 10, TimeUnit.SECONDS);
         subscriberExecutor.submit(this::runSubscriberLoop);
     }
 
+    private Jedis buildSubscriberClientQuietly() {
+        try {
+            return buildSubscriberClient();
+        } catch (Exception e) {
+            log.error("Could not connect to Redis at startup. The app will start degraded and "
+                    + "the subscriber will keep retrying.", e);
+            return null;
+        }
+    }
+
     private Jedis buildSubscriberClient() {
-        Jedis client = new Jedis(URI.create(redisUrl));
+        URI uri = URI.create(redisUrl);
+        Jedis client = new Jedis(uri);
         // Credentials may already be embedded in the URI (Upstash rediss:// style);
         // only issue an explicit AUTH when they are not.
-        boolean credentialsInUri = URI.create(redisUrl).getUserInfo() != null;
-        if (!credentialsInUri && redisPassword != null && !redisPassword.isBlank()) {
+        if (uri.getUserInfo() == null && redisPassword != null && !redisPassword.isBlank()) {
             client.auth(redisPassword);
         }
         return client;
