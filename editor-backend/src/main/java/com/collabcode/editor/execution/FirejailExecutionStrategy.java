@@ -5,8 +5,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,8 +20,7 @@ import java.util.concurrent.TimeUnit;
  * Runs code inside a firejail sandbox on a Linux host.
  *
  * firejail needs a Linux kernel with working namespaces, so this strategy is
- * unavailable on Windows (including under WSL in practice) and on Docker
- * Desktop for Windows.
+ * unavailable on Windows and on Docker Desktop for Windows.
  *
  * Enabled by default; set {@code collab.execution.type=containerized} on a
  * Docker-capable host.
@@ -33,6 +33,21 @@ public class FirejailExecutionStrategy implements ExecutionStrategy {
 
     private static final long TIMEOUT_SECONDS = 15;
     private static final int MAX_OUTPUT_CHARS = 256 * 1024;
+    private static final long AVAILABILITY_CACHE_MILLIS = 60_000;
+
+    /*
+     * Compile-time constants. The entrypoint is passed as "$1" and the Java class
+     * name as "$2" - separate argv elements, never spliced into the script text.
+     */
+    private static final String SCRIPT_CPP =
+            "set -e; g++ -std=c++17 \"$1\" -o /tmp/main; exec /tmp/main";
+    private static final String SCRIPT_PYTHON =
+            "exec python3 \"$1\"";
+    private static final String SCRIPT_JAVA =
+            "set -e; javac -d /tmp \"$1\"; exec java -cp /tmp \"$2\"";
+
+    private volatile Boolean availableCache;
+    private volatile long availableCheckedAt;
 
     @Override
     public String name() {
@@ -40,50 +55,53 @@ public class FirejailExecutionStrategy implements ExecutionStrategy {
     }
 
     @Override
-    public ExecutionResult execute(ExecutionRequest request) throws Exception {
-        String shell = resolveShell();
-        if (shell == null) {
-            throw new ExecutionUnavailableException(
-                    "No POSIX shell found. firejail execution needs a Linux host; "
-                  + "set collab.execution.type=containerized if Docker is available.");
+    public boolean available() {
+        long now = System.currentTimeMillis();
+        Boolean cached = availableCache;
+        if (cached != null && now - availableCheckedAt < AVAILABILITY_CACHE_MILLIS) {
+            return cached;
         }
-        if (!hasFirejail(shell)) {
+        boolean available = probeFirejail();
+        availableCache = available;
+        availableCheckedAt = now;
+        return available;
+    }
+
+    @Override
+    public ExecutionResult execute(ExecutionRequest request) throws Exception {
+        if (!available()) {
             throw new ExecutionUnavailableException(
-                    "firejail is not installed inside '" + shell + "'. Install it "
-                  + "(e.g. 'sudo apt install firejail'), or set collab.execution.type=containerized.");
+                    "firejail is not available on this host. Install it "
+                  + "(e.g. 'sudo apt install firejail') on Linux, or set "
+                  + "EXECUTION_TYPE=containerized where Docker is available.");
         }
 
         Path workDir = Files.createTempDirectory("collabcode-exec-");
         long started = System.currentTimeMillis();
         try {
-            for (ExecutionRequest.SourceFile f : request.files()) {
-                Path target = workDir.resolve(f.path()).normalize();
-                if (!target.startsWith(workDir)) {
-                    throw new IllegalArgumentException("Path escaped the run directory: " + f.path());
-                }
-                Files.createDirectories(target.getParent());
-                Files.writeString(target, f.content());
+            for (ExecutionRequest.SourceFile file : request.files()) {
+                ExecutionPathValidator.writeSourceFile(workDir, file.path(), file.content());
             }
 
-            List<String> cmd = new ArrayList<>();
-            cmd.add(shell);
-            cmd.add("-c");
-            cmd.add(buildCommand(request, workDir));
+            List<String> command = buildArgv(request);
+            log.info("firejail exec in {}: {}", workDir, String.join(" ", command));
 
-            log.info("firejail exec in {}", workDir);
-
-            Process process = new ProcessBuilder(cmd)
+            Process process = new ProcessBuilder(command)
                     .directory(workDir.toFile())
                     .redirectErrorStream(true)
                     .start();
 
             StringBuilder output = new StringBuilder();
-            Thread reader = new Thread(() -> drain(process, output));
+            boolean[] truncated = {false};
+            Thread reader = new Thread(() -> drain(process.getInputStream(), output, truncated));
             reader.setDaemon(true);
             reader.start();
 
             boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (!finished) {
+                // firejail forks a child sandbox process; killing only the parent
+                // would leave it running. Take the whole tree down.
+                process.descendants().forEach(ProcessHandle::destroyForcibly);
                 process.destroyForcibly();
                 reader.join(1_000);
                 return new ExecutionResult(
@@ -92,25 +110,89 @@ public class FirejailExecutionStrategy implements ExecutionStrategy {
             }
             reader.join(2_000);
 
-            synchronized (output) {
-                boolean truncated = output.length() >= MAX_OUTPUT_CHARS;
-                String text = output + (truncated ? "\n... output truncated ..." : "");
-                return new ExecutionResult(text, process.exitValue(),
-                        System.currentTimeMillis() - started, truncated);
+            String text = output.toString();
+            int exitCode = process.exitValue();
+            if (text.isBlank() && exitCode == 137) {
+                text = "Process was killed (out of memory, or the process limit was reached).";
             }
+            if (truncated[0]) {
+                text = text + "\n... output truncated at " + (MAX_OUTPUT_CHARS / 1024) + " KB ...";
+            }
+            return new ExecutionResult(text, exitCode,
+                    System.currentTimeMillis() - started, truncated[0]);
         } finally {
             deleteRecursively(workDir);
         }
     }
 
-    private static void drain(Process process, StringBuilder output) {
-        try (BufferedReader r = new BufferedReader(
-                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                synchronized (output) {
-                    if (output.length() >= MAX_OUTPUT_CHARS) return;
-                    output.append(line).append('\n');
+    /**
+     * firejail is invoked directly - no shell wraps it. The only shell involved is
+     * the one firejail runs to sequence compile-then-run, and its script is a
+     * constant; the entrypoint arrives as a separate positional argument.
+     */
+    private static List<String> buildArgv(ExecutionRequest request) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("firejail");
+        cmd.add("--private");
+        cmd.add("--net=none");
+        cmd.add("--rlimit-cpu=2");
+        cmd.add("--rlimit-as=268435456");
+        cmd.add("--quiet");
+        cmd.add("/bin/sh");
+        cmd.add("-c");
+        cmd.add(scriptFor(request));
+        cmd.add("sh");
+        cmd.add(request.entrypoint());
+        if (request.language() == Language.JAVA) {
+            // javac writes <Class>.class; java takes a class name, not a path.
+            cmd.add(request.baseName().replace(".java", ""));
+        }
+        return cmd;
+    }
+
+    private static String scriptFor(ExecutionRequest request) {
+        return switch (request.language()) {
+            case CPP -> SCRIPT_CPP;
+            case PYTHON -> SCRIPT_PYTHON;
+            case JAVA -> SCRIPT_JAVA;
+        };
+    }
+
+    private static boolean probeFirejail() {
+        try {
+            Process process = new ProcessBuilder("firejail", "--version")
+                    .redirectErrorStream(true)
+                    .start();
+            return process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0;
+        } catch (Exception e) {
+            // Not on PATH (e.g. Windows): cannot run here.
+            return false;
+        }
+    }
+
+    /**
+     * Bounded chunked read. readLine() would buffer an unbounded single line
+     * before the cap could be applied, which is the memory-exhaustion case this
+     * cap exists to prevent.
+     */
+    private static void drain(InputStream in, StringBuilder out, boolean[] truncated) {
+        char[] buffer = new char[8192];
+        try (Reader reader = new InputStreamReader(in, StandardCharsets.UTF_8)) {
+            int n;
+            while ((n = reader.read(buffer)) != -1) {
+                synchronized (out) {
+                    int remaining = MAX_OUTPUT_CHARS - out.length();
+                    if (remaining <= 0) {
+                        truncated[0] = true;
+                        return;
+                    }
+                    if (n <= remaining) {
+                        out.append(buffer, 0, n);
+                    } else {
+                        out.append(buffer, 0, remaining);
+                        truncated[0] = true;
+                        return;
+                    }
                 }
             }
         } catch (Exception ignored) {
@@ -118,60 +200,16 @@ public class FirejailExecutionStrategy implements ExecutionStrategy {
         }
     }
 
-    private static String buildCommand(ExecutionRequest r, Path workDir) {
-        String entry = r.entrypoint();
-        String base = entry.substring(entry.lastIndexOf('/') + 1);
-        String limits = "firejail --private --net=none --rlimit-cpu=2 --rlimit-as=268435456 --quiet";
-        return switch (r.language()) {
-            case "cpp", "c++" -> limits + " /bin/sh -c \"g++ -std=c++17 " + entry
-                    + " -o /tmp/main && /tmp/main\"";
-            case "py", "python" -> limits + " /bin/sh -c \"python3 " + entry + "\"";
-            case "java" -> limits + " /bin/sh -c \"javac -d /tmp " + entry
-                    + " && java -cp /tmp " + base.replace(".java", "") + "\"";
-            default -> throw new IllegalArgumentException("No command for language: " + r.language());
-        };
-    }
-
-    private static String resolveShell() {
-        if (System.getProperty("os.name").toLowerCase().contains("win")) {
-            if (onPath("wsl.exe")) return "wsl.exe";
-            if (onPath("bash.exe")) return "bash.exe";
-            return null;
-        }
-        return onPath("bash") ? "bash" : null;
-    }
-
-    private static boolean onPath(String exe) {
-        String path = System.getenv("PATH");
-        if (path == null) return false;
-        for (String dir : path.split(java.io.File.pathSeparator)) {
-            if (new java.io.File(dir, exe).canExecute()) return true;
-        }
-        return false;
-    }
-
-    private static boolean hasFirejail(String shell) {
-        try {
-            Process p = new ProcessBuilder(shell, "-c", "command -v firejail")
-                    .redirectErrorStream(true).start();
-            if (!p.waitFor(10, TimeUnit.SECONDS)) {
-                p.destroyForcibly();
-                return false;
-            }
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                return p.exitValue() == 0 && r.readLine() != null;
-            }
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     private static void deleteRecursively(Path dir) {
         if (dir == null || !Files.exists(dir)) return;
         try (var walk = Files.walk(dir)) {
             walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try { Files.deleteIfExists(p); } catch (Exception ignored) { }
+                try {
+                    Files.deleteIfExists(p);
+                } catch (Exception ignored) {
+                }
             });
-        } catch (Exception ignored) { }
+        } catch (Exception ignored) {
+        }
     }
 }

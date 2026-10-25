@@ -56,7 +56,9 @@ const CodeEditor = ({ filename, content, onCodeChange, path, reff }) => {
 
       if (lastTimeoutRef.current) clearTimeout(lastTimeoutRef.current);
       lastTimeoutRef.current = setTimeout(() => {
-        onCodeChange(filenameRef.current, editor.getValue());
+        // Keep the parent's `files` state in sync with the editor, not just the
+        // WebSocket. Run reads this state for files that are not currently open.
+        onCodeChange(filenameRef.current, editor.getValue(), { updateFileState: true });
       }, 150);
     });
   };

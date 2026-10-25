@@ -1,3 +1,5 @@
+import { loader } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor'
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker'
 import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker'
@@ -32,5 +34,13 @@ globalThis.MonacoEnvironment = {
     }
   },
 }
+
+/**
+ * Tell @monaco-editor/react to use THIS bundled Monaco instance instead of
+ * loading its own copy from the CDN. Otherwise the wrapper and the app hold two
+ * different Monaco instances, and `monaco.editor.getModels()` in Editor.jsx
+ * cannot see the editor's models.
+ */
+loader.config({ monaco })
 
 export default globalThis.MonacoEnvironment
