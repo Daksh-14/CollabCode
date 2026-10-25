@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,11 +36,27 @@ public class ContainerExecutionStrategy implements ExecutionStrategy {
     private static final long TIMEOUT_SECONDS = 15;
     private static final int MAX_OUTPUT_CHARS = 256 * 1024;
 
+    /*
+     * These scripts are compile-time constants. The entrypoint is never
+     * interpolated into them: it arrives as a positional parameter ("$1"), i.e.
+     * a separate argv element. That removes the historical RCE where a crafted
+     * filename could end the quoting and inject commands. The language's
+     * extension is also fixed, so "$1" is always a path we validated.
+     */
+    private static final String SCRIPT_CPP =
+            "set -e; g++ -std=c++17 \"$1\" -o /tmp/main; exec /tmp/main";
+    private static final String SCRIPT_PYTHON =
+            "exec python3 \"$1\"";
+    private static final String SCRIPT_JAVA =
+            "set -e; javac -d /tmp \"$1\"; exec java -cp /tmp \"$2\"";
+
     private final String dockerBinary;
+    private final DockerProbe dockerProbe;
 
     public ContainerExecutionStrategy(
-            org.springframework.core.env.Environment env) {
+            org.springframework.core.env.Environment env, DockerProbe dockerProbe) {
         this.dockerBinary = env.getProperty("collab.execution.docker-binary", "docker");
+        this.dockerProbe = dockerProbe;
     }
 
     @Override
@@ -48,63 +65,34 @@ public class ContainerExecutionStrategy implements ExecutionStrategy {
     }
 
     @Override
+    public boolean available() {
+        return dockerProbe.isAvailable();
+    }
+
+    @Override
     public ExecutionResult execute(ExecutionRequest request) throws Exception {
-        if (!dockerIsUp()) {
+        if (!dockerProbe.isAvailable()) {
             throw new ExecutionUnavailableException(
                     "Docker is not reachable from the backend. Start Docker Desktop, or set "
                   + "collab.execution.type to a strategy this host supports.");
         }
 
         Path workDir = Files.createTempDirectory("collabcode-exec-");
+        String containerName = "collabcode-exec-" + UUID.randomUUID();
         long started = System.currentTimeMillis();
         try {
-            for (ExecutionRequest.SourceFile f : request.files()) {
-                Path target = workDir.resolve(f.path()).normalize();
-                // Belt and braces: validation already rejected traversal, this
-                // asserts containment so a future regression cannot escape.
-                if (!target.startsWith(workDir)) {
-                    throw new IllegalArgumentException("Path escaped the run directory: " + f.path());
-                }
-                Files.createDirectories(target.getParent());
-                Files.writeString(target, f.content());
+            for (ExecutionRequest.SourceFile file : request.files()) {
+                // The validator rejects traversal and refutes symlinks; this also
+                // creates the parent folders so nested paths materialise.
+                ExecutionPathValidator.writeSourceFile(workDir, file.path(), file.content());
             }
 
-            List<String> cmd = new ArrayList<>();
-            cmd.add(dockerBinary);
-            cmd.add("run");
-            cmd.add("--rm");
-            cmd.add("--network");            cmd.add("none");
-            cmd.add("--memory");             cmd.add("256m");
-            cmd.add("--memory-swap");        cmd.add("256m");   // no swap escape hatch
-            cmd.add("--cpus");               cmd.add("1");
-            cmd.add("--pids-limit");         cmd.add("128");
-            cmd.add("--cap-drop");           cmd.add("ALL");
-            cmd.add("--security-opt");       cmd.add("no-new-privileges");
-            cmd.add("--user");               cmd.add("1000:1000");
-            cmd.add("--read-only");
-            // Writable and EXECUTABLE. Docker force-adds `noexec` to --tmpfs unless
-            // `exec` is given explicitly, which makes the compiled binary fail with
-            // "Permission denied" even though it compiled fine. Verified: omitting
-            // `exec` here yields a noexec mount and exit code 126.
-            // Isolation comes from --network none, --cap-drop ALL, --read-only,
-            // --user, and the memory/cpu/pids limits.
-            cmd.add("--tmpfs");              cmd.add("/tmp:rw,exec,nosuid,nodev,size=64m");
-            cmd.add("--workdir");            cmd.add("/src");
-            cmd.add("-v");                   cmd.add(workDir.toAbsolutePath() + ":/src:ro");
-            cmd.add(imageFor(request.language()));
-            cmd.add("/bin/sh");
-            cmd.add("-c");
-            // Fixed per-language command. The entrypoint was already validated
-            // against [A-Za-z0-9._-]+ and the language's extension, so it is safe
-            // to interpolate here, and it is never quoted into a user-visible
-            // shell fragment.
-            cmd.add(buildCommand(request));
+            List<String> command = buildArgv(request, workDir, containerName);
+            log.info("docker exec: {}", String.join(" ", command));
 
-            log.info("docker exec: {}", String.join(" ", cmd));
-
-            ProcessBuilder pb = new ProcessBuilder(cmd).redirectErrorStream(true);
-            pb.environment().remove("DOCKER_HOST");
-            Process process = pb.start();
+            ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
+            builder.environment().remove("DOCKER_HOST");
+            Process process = builder.start();
 
             StringBuilder output = new StringBuilder();
             boolean[] truncated = {false};
@@ -114,6 +102,10 @@ public class ContainerExecutionStrategy implements ExecutionStrategy {
 
             boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (!finished) {
+                // Killing the `docker` CLI does NOT stop the container: the daemon
+                // owns it. Kill it by name, otherwise a runaway program keeps
+                // consuming CPU after the request has returned.
+                killContainer(containerName);
                 process.destroyForcibly();
                 reader.join(1_000);
                 return new ExecutionResult(
@@ -123,14 +115,80 @@ public class ContainerExecutionStrategy implements ExecutionStrategy {
             reader.join(2_000);
 
             String text = output.toString();
+            int exitCode = process.exitValue();
+            if (text.isBlank() && exitCode == 137) {
+                // 128 + SIGKILL. The kernel kills an over-limit process without
+                // writing anything, and `exec` means no shell is left to print
+                // "Killed", so say it here instead of returning empty output.
+                text = "Process was killed (out of memory, or the process limit was reached).";
+            }
             if (truncated[0]) {
                 text = text + "\n... output truncated at " + (MAX_OUTPUT_CHARS / 1024) + " KB ...";
             }
-            return new ExecutionResult(text, process.exitValue(),
+            return new ExecutionResult(text, exitCode,
                     System.currentTimeMillis() - started, truncated[0]);
         } finally {
             deleteRecursively(workDir);
         }
+    }
+
+    /**
+     * Builds the argument vector.
+     *
+     * Everything Docker-specific is a fixed flag; the only variable parts are the
+     * entrypoint (a separate argv element) and the Java class name derived from
+     * the entrypoint's basename. No user data is ever spliced into a string that
+     * a shell later parses.
+     */
+    private List<String> buildArgv(ExecutionRequest request, Path workDir, String containerName) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(dockerBinary);
+        cmd.add("run");
+        cmd.add("--rm");
+        // A unique name lets the timeout path stop a container the CLI no longer
+        // controls.
+        cmd.add("--name");         cmd.add(containerName);
+        cmd.add("--network");      cmd.add("none");
+        cmd.add("--memory");       cmd.add("256m");
+        cmd.add("--memory-swap");  cmd.add("256m");   // no swap escape hatch
+        cmd.add("--cpus");         cmd.add("1");
+        cmd.add("--pids-limit");   cmd.add("128");
+        cmd.add("--cap-drop");     cmd.add("ALL");
+        cmd.add("--security-opt"); cmd.add("no-new-privileges");
+        cmd.add("--user");         cmd.add("1000:1000");
+        cmd.add("--read-only");
+        // Writable and EXECUTABLE. Docker force-adds `noexec` to --tmpfs unless
+        // `exec` is given explicitly, which makes the compiled binary fail with
+        // "Permission denied" even though it compiled fine.
+        cmd.add("--tmpfs");        cmd.add("/tmp:rw,exec,nosuid,nodev,size=64m");
+        cmd.add("--workdir");      cmd.add("/src");
+        cmd.add("-v");             cmd.add(workDir.toAbsolutePath() + ":/src:ro");
+        cmd.add(request.language().image());
+        cmd.add("/bin/sh");
+        cmd.add("-c");
+
+        String entry = "/src/" + request.entrypoint();
+        switch (request.language()) {
+            case CPP -> {
+                cmd.add(SCRIPT_CPP);
+                cmd.add("sh");
+                cmd.add(entry);
+            }
+            case PYTHON -> {
+                cmd.add(SCRIPT_PYTHON);
+                cmd.add("sh");
+                cmd.add(entry);
+            }
+            case JAVA -> {
+                cmd.add(SCRIPT_JAVA);
+                cmd.add("sh");
+                cmd.add(entry);
+                // javac writes /tmp/<Class>.class for a package-less class, and
+                // java takes a class name, not a path.
+                cmd.add(request.baseName().replace(".java", ""));
+            }
+        }
+        return cmd;
     }
 
     /**
@@ -140,15 +198,12 @@ public class ContainerExecutionStrategy implements ExecutionStrategy {
      * because a single output "line" can be arbitrarily large: readLine() would
      * materialise it in full before the cap was ever consulted, which is exactly
      * the memory-exhaustion case the cap exists to prevent.
-     *
-     * Once the cap is reached the stream is left unread on purpose - the caller
-     * destroys the process on timeout, which closes it.
      */
     private static void drain(InputStream in, StringBuilder out, boolean[] truncated) {
-        char[] buf = new char[8192];
-        try (Reader r = new InputStreamReader(in, StandardCharsets.UTF_8)) {
+        char[] buffer = new char[8192];
+        try (Reader reader = new InputStreamReader(in, StandardCharsets.UTF_8)) {
             int n;
-            while ((n = r.read(buf)) != -1) {
+            while ((n = reader.read(buffer)) != -1) {
                 synchronized (out) {
                     int remaining = MAX_OUTPUT_CHARS - out.length();
                     if (remaining <= 0) {
@@ -156,9 +211,9 @@ public class ContainerExecutionStrategy implements ExecutionStrategy {
                         return;
                     }
                     if (n <= remaining) {
-                        out.append(buf, 0, n);
+                        out.append(buffer, 0, n);
                     } else {
-                        out.append(buf, 0, remaining);
+                        out.append(buffer, 0, remaining);
                         truncated[0] = true;
                         return;
                     }
@@ -169,60 +224,27 @@ public class ContainerExecutionStrategy implements ExecutionStrategy {
         }
     }
 
-    private static String imageFor(String lang) {
-        return switch (lang) {
-            case "cpp", "c++" -> "gcc:12";
-            case "py", "python" -> "python:3.12-slim";
-            case "java" -> "eclipse-temurin:17-jdk";
-            default -> throw new IllegalArgumentException("No image for language: " + lang);
-        };
-    }
-
-    private static String buildCommand(ExecutionRequest r) {
-        // The entrypoint may live in a folder ("src/main.cpp"), so compile the
-        // full path but key the output/class off the basename.
-        String entry = r.entrypoint();
-        String base = entry.substring(entry.lastIndexOf('/') + 1);
-        return switch (r.language()) {
-            case "cpp", "c++" -> "g++ -std=c++17 /src/" + entry + " -o /tmp/main && /tmp/main";
-            case "py", "python" -> "python3 /src/" + entry;
-            case "java" ->
-                    "javac -d /tmp /src/" + entry + " && java -cp /tmp "
-                  + base.replace(".java", "");
-            default -> throw new IllegalArgumentException("No command for language: " + r.language());
-        };
-    }
-
     /**
-     * Docker reachability is cached: `docker info` is a real RPC to the daemon and
-     * can be slow or briefly fail under load, which turned a healthy host into a
-     * spurious 503. A capability does not change between two requests seconds apart.
+     * Stops a container by name. `--rm` removes it once it stops; the explicit
+     * `rm -f` covers the case where `kill` lost a race with the container exiting.
      */
-    private volatile Boolean dockerUp;
-    private volatile long dockerCheckedAt;
-
-    private boolean dockerIsUp() {
-        long now = System.currentTimeMillis();
-        Boolean cached = dockerUp;
-        if (cached != null && now - dockerCheckedAt < 30_000) {
-            return cached;
-        }
-        boolean up = probeDocker();
-        dockerUp = up;
-        dockerCheckedAt = now;
-        if (!up) {
-            log.warn("Docker is not reachable from the backend");
-        }
-        return up;
-    }
-
-    private boolean probeDocker() {
+    private void killContainer(String containerName) {
         try {
-            Process p = new ProcessBuilder(dockerBinary, "info", "--format", "{{.ServerVersion}}")
-                    .redirectErrorStream(true).start();
-            return p.waitFor(10, TimeUnit.SECONDS) && p.exitValue() == 0;
+            Process kill = new ProcessBuilder(dockerBinary, "kill", containerName)
+                    .redirectErrorStream(true)
+                    .start();
+            if (!kill.waitFor(10, TimeUnit.SECONDS)) {
+                kill.destroyForcibly();
+            }
         } catch (Exception e) {
-            return false;
+            log.warn("Could not kill container {}: {}", containerName, e.getMessage());
+        }
+        try {
+            new ProcessBuilder(dockerBinary, "rm", "-f", containerName)
+                    .redirectErrorStream(true)
+                    .start();
+        } catch (Exception ignored) {
+            // Already gone.
         }
     }
 
@@ -230,8 +252,12 @@ public class ContainerExecutionStrategy implements ExecutionStrategy {
         if (dir == null || !Files.exists(dir)) return;
         try (var walk = Files.walk(dir)) {
             walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try { Files.deleteIfExists(p); } catch (Exception ignored) { }
+                try {
+                    Files.deleteIfExists(p);
+                } catch (Exception ignored) {
+                }
             });
-        } catch (Exception ignored) { }
+        } catch (Exception ignored) {
+        }
     }
 }

@@ -31,6 +31,11 @@ public class ExecutionService {
         return strategy.name();
     }
 
+    /** Whether the selected strategy can run code on this host right now. */
+    public boolean strategyAvailable() {
+        return strategy.available();
+    }
+
     public ExecutionResult execute(CodeSession request) throws Exception {
         if (request == null) {
             throw new IllegalArgumentException("Empty execution request.");

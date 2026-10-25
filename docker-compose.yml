@@ -1,11 +1,12 @@
 # Local development dependencies.
 #
-#   docker compose up -d                      -> Redis only (if you already run Postgres locally)
-#   docker compose --profile full up -d        -> Redis + Postgres
+#   docker compose up -d                        -> Redis only (if you already run Postgres locally)
+#   docker compose --profile full up -d         -> Redis + Postgres
+#   docker compose --profile backend up -d      -> Redis + Postgres + backend
 #
 # Redis is in the default set because it is required by the backend and has no
-# native Windows build. Postgres is behind the "full" profile so it does not
-# fight with a Postgres you are already running on port 5432.
+# native Windows build. Postgres is behind the "full" and "backend" profiles so
+# it does not fight with a Postgres you are already running on port 5432.
 
 services:
   redis:
@@ -23,7 +24,8 @@ services:
       - redis-data:/data
 
   postgres:
-    profiles: ["full"]
+    # Also enabled by the "backend" profile: the backend container depends on it.
+    profiles: ["full", "backend"]
     image: postgres:16-alpine
     container_name: collabcode-postgres
     ports:
@@ -66,16 +68,19 @@ services:
       - "8080:8080"
     environment:
       PORT: "8080"
-      # host.docker.internal reaches services on the Windows host. Inside a Linux
-      # network namespace, "localhost" means the container itself, not your machine.
-      DB_URL: "jdbc:postgresql://host.docker.internal:5432/CollabCode"
+      # Service names, not localhost: on the compose network PostgreSQL and Redis
+      # are reachable by their service names on their internal ports.
+      DB_URL: "jdbc:postgresql://postgres:5432/CollabCode"
       DB_USER: "postgres"
       DB_PASS: "postgres"
-      # Service name, not localhost: on the compose network Redis is reachable
-      # by its service name.
       REDIS_URL: "redis://redis:6379"
+      # Execution strategy: firejail (default) or containerized.
+      # containerized needs the Docker CLI + socket mounted; firejail works here.
+      EXECUTION_TYPE: "firejail"
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 

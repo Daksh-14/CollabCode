@@ -17,6 +17,15 @@ public interface ExecutionStrategy {
     String name();
 
     /**
+     * Whether this strategy can run on the current host. Reported by
+     * {@code GET /api/health}; implementations should cache a failed/slow probe
+     * rather than paying for it on every request.
+     */
+    default boolean available() {
+        return true;
+    }
+
+    /**
      * Runs the request.
      *
      * @throws IllegalArgumentException if the request is malformed (client error)

@@ -142,16 +142,20 @@ const Editor = () => {
   const handleRun = async () => {
     if (!mainFile || !isRunnableFile(mainFile)) return;
 
-    // Read straight from the live Monaco model: `files` state can lag behind
-    // the editor by up to the 150ms debounce window.
-    const model = monaco.editor
-      .getModels()
-      .find(m => m.uri.toString() === monaco.Uri.parse(currentFile).toString());
-    const latestContent = model?.getValue() ?? files[currentFile] ?? '';
+    // Prefer the live Monaco model for every file. `files` state can lag the
+    // editor by up to the 150ms debounce window, and the entrypoint is not
+    // necessarily the file currently open, so picking a single "current" file
+    // was wrong.
+    const liveContent = (path) => {
+      const uri = monaco.Uri.parse(path).toString();
+      const model = monaco.editor.getModels().find(m => m.uri.toString() === uri);
+      return model?.getValue();
+    };
 
-    const codeFiles = Object.entries(files).map(([path, content]) =>
-      path === currentFile ? { path, content: latestContent } : { path, content }
-    );
+    const codeFiles = Object.entries(files).map(([path, content]) => ({
+      path,
+      content: liveContent(path) ?? content,
+    }));
 
     setRunStatus('running');
     setOutput(null);

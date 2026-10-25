@@ -15,11 +15,13 @@ COPY src ./src
 RUN ./mvnw -B clean package -DskipTests
 
 
-FROM eclipse-temurin:17-jre AS runtime
+FROM eclipse-temurin:17-jdk AS runtime
 
 # firejail is required by the default (firejail) execution strategy.
+# g++ and javac (from the JDK base image) are required to compile user C++ and
+# Java code inside the sandbox. The JRE-only image lacked both.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends firejail bash python3 \
+ && apt-get install -y --no-install-recommends firejail bash python3 g++ \
  && rm -rf /var/lib/apt/lists/*
 
 # Unprivileged runtime user. Code execution must never run as root.
